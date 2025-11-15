@@ -1,3 +1,24 @@
+from flask import Flask
+from flask_cors import CORS
+
+def create_app():
+    app = Flask(__name__)
+    CORS(app)
+
+    # register blueprints
+    from api.predict import predict_bp
+    from api.health import health_bp
+
+    app.register_blueprint(predict_bp, url_prefix="/api")
+    app.register_blueprint(health_bp, url_prefix="/api")
+
+    return app
+
+app = create_app()
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
 from flask import Flask, send_from_directory, render_template
 from flask_cors import CORS
 import os
