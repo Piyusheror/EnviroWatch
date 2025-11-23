@@ -1,0 +1,119 @@
+# api/utils/fetch_aqi.py
+"""
+Robust AQI fetcher for EnviroWatch.
+- Try OpenAQ v2/latest by city
+- If OpenAQ returns empty / error, fallback to OpenWeather Air Pollution API
+  (requires OPENWEATHER_API_KEY env var)
+Return shape:
+{
+  "city": "...",
+  "ok": True/False,
+  "fetched_at": "...",
+  "measurements": [ {parameter, value, unit, lastUpdated, location, source} ... ],
+  "aqi": <numeric AQI or 0 if unknown>,
+  "error": <optional error string>,
+  "raw": <original provider JSON or None>
+}
+"""
+import os
+import requests
+from datetime import datetime
+from typing import Dict, Any
+
+OPENAQ_BASE = "https://api.openaq.org/v2/latest"
+OW_GEO = "http://api.openweathermap.org/geo/1.0/direct"
+OW_AIR = "http://api.openweathermap.org/data/2.5/air_pollution"
+
+def _now_iso():
+    return datetime.utcnow().isoformat() + "Z"
+
+def fetch_openaq_latest(city: str, limit: int = 1, timeout: int = 6) -> Dict[str, Any]:
+    params = {"city": city, "limit": limit}
+    try:
+        r = requests.get(OPENAQ_BASE, params=params, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        return {"city": city, "measurements": [], "ok": False, "error": str(e), "fetched_at": _now_iso(), "raw": None}
+
+    results = data.get("results", []) if isinstance(data, dict) else []
+    out = {"city": city, "measurements": [], "ok": bool(results), "fetched_at": _now_iso(), "raw": data}
+    if not results:
+        return out
+
+    for loc in results[:limit]:
+        loc_name = loc.get("location")
+        for m in loc.get("measurements", []):
+            out["measurements"].append({
+                "location": loc_name,
+                "parameter": m.get("parameter"),
+                "value": m.get("value"),
+                "unit": m.get("unit"),
+                "lastUpdated": m.get("lastUpdated"),
+                "sourceName": m.get("sourceName") or loc.get("sourceName")
+            })
+    return out
+
+def fetch_openweather_aqi_by_city(city: str, timeout: int = 6) -> Dict[str, Any]:
+    """
+    Use OpenWeather: 1) geocode city -> lat/lon, 2) call air_pollution endpoint
+    Returns similar format as fetch_openaq_latest but with 'aqi' (OpenWeather index 1-5)
+    """
+    key = os.environ.get("OPENWEATHER_API_KEY")
+    if not key:
+        return {"city": city, "measurements": [], "ok": False, "error": "Missing OPENWEATHER_API_KEY", "fetched_at": _now_iso(), "raw": None}
+    try:
+        # geocode
+        r = requests.get(OW_GEO, params={"q": city, "limit": 1, "appid": key}, timeout=timeout)
+        r.raise_for_status()
+        geo = r.json()
+        if not geo:
+            return {"city": city, "measurements": [], "ok": False, "error": "geocoding returned empty", "fetched_at": _now_iso(), "raw": None}
+        lat = geo[0]["lat"]; lon = geo[0]["lon"]
+        # air pollution
+        r2 = requests.get(OW_AIR, params={"lat": lat, "lon": lon, "appid": key}, timeout=timeout)
+        r2.raise_for_status()
+        raw = r2.json()
+    except Exception as e:
+        return {"city": city, "measurements": [], "ok": False, "error": str(e), "fetched_at": _now_iso(), "raw": None}
+
+    measurements = []
+    aqi_val = 0
+    try:
+        list0 = raw.get("list", [])
+        if list0:
+            components = list0[0].get("components", {})
+            for p, v in components.items():
+                measurements.append({
+                    "parameter": p,
+                    "value": v,
+                    "unit": "µg/m3" if p != "co" else "µg/m3",
+                    "lastUpdated": _now_iso(),
+                    "location": f"{city} (geo)",
+                    "sourceName": "openweather"
+                })
+            # openweather 'main' -> {'aqi': 1..5}
+            aqi_val = list0[0].get("main", {}).get("aqi", 0)
+    except Exception:
+        pass
+
+    return {"city": city, "measurements": measurements, "ok": True, "aqi": aqi_val, "fetched_at": _now_iso(), "raw": raw}
+
+def fetch_aqi_for(city: str, limit: int = 1, timeout: int = 6) -> Dict[str, Any]:
+    """
+    Backwards-compatible wrapper used by endpoints. Tries OpenAQ then OpenWeather.
+    """
+    # 1) try OpenAQ
+    openaq = fetch_openaq_latest(city=city, limit=limit, timeout=timeout)
+    if openaq.get("ok") and openaq.get("measurements"):
+        # convert minimal aqi: prefer pm25->approx aqi mapping? keep raw values for now
+        return {"city": city, "aqi": 0, "measurements": openaq["measurements"], "ok": True, "fetched_at": openaq["fetched_at"], "raw": openaq["raw"]}
+
+    # 2) fallback to OpenWeather (requires key)
+    ow = fetch_openweather_aqi_by_city(city=city, timeout=timeout)
+    if ow.get("ok") and ow.get("measurements"):
+        return {"city": city, "aqi": ow.get("aqi", 0), "measurements": ow["measurements"], "ok": True, "fetched_at": ow["fetched_at"], "raw": ow["raw"]}
+
+    # 3) both failed, return last error (prefer OpenAQ error message)
+    err = openaq.get("error") or ow.get("error") or "no data"
+    return {"city": city, "measurements": [], "ok": False, "error": err, "fetched_at": _now_iso(), "raw": None}

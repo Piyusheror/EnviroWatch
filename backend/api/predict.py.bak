@@ -1,27 +1,35 @@
-# backend/api/predict.py
 from flask import Blueprint, request, jsonify
-from models.model_wrapper import load_model, predict_single
+# replace the bad import with:
+from flask import current_app
+
+# then, whenever the endpoint needs the wrapper, use:
+wrapper = None
+# (this is identical to how your predict_auto uses current_app)
+
 
 predict_bp = Blueprint("predict", __name__)
 
-# lazy module-level global
-MODEL = None
 
-def _ensure_model():
-    global MODEL
-    if MODEL is None:
-        MODEL = load_model()
-    return MODEL
+def get_wrapper():
+    """Return the ModelWrapper attached to the Flask app, read lazily at request time."""
+    try:
+        from flask import current_app
+        return getattr(current_app, "model_wrapper", None)
+    except RuntimeError:
+        # no app context available
+        return None
+
 
 @predict_bp.route("/predict", methods=["POST"])
 def predict():
-    model = _ensure_model()
-    payload = request.get_json(force=True, silent=True)
-    if not payload:
-        return jsonify({"error": "invalid or empty JSON"}), 400
-
     try:
-        result = predict_single(model, payload)
-        return jsonify({"prediction": result}), 200
+        payload = request.json
+
+        if not payload:
+            return jsonify({"error": "No JSON received"}), 400
+
+        result = model_wrapper.predict(payload)
+        return jsonify(result)
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500

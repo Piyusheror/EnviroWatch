@@ -1,0 +1,61 @@
+"""
+Minimal OpenAQ helper for EnviroWatch.
+Provides fetch_openaq_latest(city) -> dict
+"""
+
+import requests
+from datetime import datetime
+
+OPENAQ_BASE = "https://api.openaq.org/v2/latest"
+
+def _safe_get(json_obj, *keys):
+    cur = json_obj
+    for k in keys:
+        if isinstance(cur, dict) and k in cur:
+            cur = cur[k]
+        else:
+            return None
+    return cur
+
+def fetch_openaq_latest(city: str, limit: int = 1, timeout: int = 8) -> dict:
+    """
+    Query OpenAQ latest measurements for `city`.
+    Returns a dict like:
+    {
+      "city": "Mumbai",
+      "location": "XYZ",
+      "measurements": [
+         {"parameter":"pm25","value":12.3,"unit":"µg/m³","lastUpdated":"2025-11-15T...Z"},
+         ...
+      ],
+      "fetched_at": "ISO timestamp",
+      "raw": {...}   # full OpenAQ response (optional)
+    }
+    If no data found, returns {"city": city, "measurements": [], "fetched_at": ...}
+    """
+    params = {"city": city, "limit": limit}
+    try:
+        r = requests.get(OPENAQ_BASE, params=params, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        return {"city": city, "measurements": [], "error": str(e), "fetched_at": datetime.utcnow().isoformat() + "Z"}
+
+    results = data.get("results", []) if isinstance(data, dict) else []
+    out = {"city": city, "measurements": [], "fetched_at": datetime.utcnow().isoformat() + "Z", "raw": data}
+    if not results:
+        return out
+
+    # Flatten measurements for first `limit` locations
+    for loc in results[:limit]:
+        location_name = loc.get("location")
+        for m in loc.get("measurements", []):
+            out["measurements"].append({
+                "location": location_name,
+                "parameter": m.get("parameter"),
+                "value": m.get("value"),
+                "unit": m.get("unit"),
+                "lastUpdated": m.get("lastUpdated"),
+                "sourceName": m.get("sourceName") or loc.get("sourceName")
+            })
+    return out

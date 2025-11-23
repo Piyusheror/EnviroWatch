@@ -1,0 +1,11 @@
+
+# model binaries
+models/*.pkl
+*.pkl
+
+
+# cache
+__pycache__/
+*.py[cod]
+.venv/
+
